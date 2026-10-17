@@ -6,8 +6,7 @@
   <date>2026-10-17</date>
   <maintainer>Noetic Studio LLC</maintainer>
   <license file="LICENSE">LGPL-2.1-or-later</license>
-  <!-- Once GitHub repository is created, add:
-       <url type="repository" branch="main">https://github.com/OWNER/ExternalThemeCreator</url> -->
+  <url type="repository" branch="main">https://github.com/FreeCAD-Nut/ExternalThemeCreator</url>
   <icon>Resources/icons/ETC_export.svg</icon>
   <content>
     <workbench>
