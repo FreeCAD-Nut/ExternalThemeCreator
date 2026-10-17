@@ -1,0 +1,131 @@
+
+name: ETC Static Checks
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  static-checks:
+    name: Validate ETC Sources
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Run static checks
+        shell: bash
+        run: |
+          python - <<'PY'
+          import ast
+          from pathlib import Path
+          import sys
+          import xml.etree.ElementTree as ET
+
+          root = Path(".")
+          errors = []
+
+          # 1. Check Python syntax without importing FreeCAD.
+          py_files = sorted(root.rglob("*.py"))
+          py_files = [
+              p for p in py_files
+              if not any(
+                  part.startswith(".") or part in {
+                      "__pycache__", "build", "dist", "venv"
+                  }
+                  for part in p.parts
+              )
+          ]
+
+          for path in py_files:
+              try:
+                  ast.parse(
+                      path.read_text(encoding="utf-8-sig"),
+                      filename=str(path)
+                  )
+              except (SyntaxError, UnicodeError) as exc:
+                  errors.append(f"Python syntax: {path}: {exc}")
+
+          print(f"Checked {len(py_files)} Python files.")
+
+          # 2. Check required FreeCAD workbench files.
+          required = [
+              "Init.py",
+              "InitGui.py",
+              "LICENSE",
+              "README.md",
+              "package.xml",
+              "Resources/icons/ETC_export.svg",
+          ]
+
+          for filename in required:
+              if not (root / filename).is_file():
+                  errors.append(f"Missing required file: {filename}")
+
+          # 3. Check XML structure and icon references.
+          manifest = root / "package.xml"
+
+          if manifest.is_file():
+              try:
+                  tree = ET.parse(manifest)
+                  package = tree.getroot()
+
+                  if package.tag.split("}")[-1] != "package":
+                      errors.append("Invalid package.xml root element.")
+
+                  def children_named(parent, name):
+                      return [
+                          child for child in parent.iter()
+                          if child.tag.split("}")[-1] == name
+                      ]
+
+                  for item in children_named(package, "icon"):
+                      icon_path = (item.text or "").strip()
+                      if not icon_path:
+                          errors.append("Empty icon in package.xml.")
+                      elif not (root / icon_path).is_file():
+                          errors.append(
+                              f"Missing referenced icon: {icon_path}"
+                          )
+
+                  versions = children_named(package, "version")
+                  if not versions or not (versions[0].text or "").strip():
+                      errors.append("Missing package version.")
+
+              except ET.ParseError as exc:
+                  errors.append(f"Invalid package.xml: {exc}")
+
+          # 4. Check all ETC SVG files for XML validity.
+          icon_dir = root / "Resources" / "icons"
+
+          if icon_dir.is_dir():
+              svg_files = sorted(icon_dir.glob("*.svg"))
+
+              for path in svg_files:
+                  try:
+                      ET.parse(path)
+                  except ET.ParseError as exc:
+                      errors.append(f"Invalid SVG: {path}: {exc}")
+
+              print(f"Checked {len(svg_files)} SVG files.")
+
+          # 5. Report results.
+          if errors:
+              print("\nSTATIC CHECKS FAILED:")
+              for error in errors:
+                  print(f"  ERROR: {error}")
+              sys.exit(1)
+
+          print("\nAll ETC static checks passed.")
+          PY
