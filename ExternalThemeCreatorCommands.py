@@ -19,7 +19,8 @@ QSS_KEY='DevelopmentQSSPath'; FOLDER_KEY='ThemeFolder'; THEME_KEY='ThemeFile'; C
 CONFIG_NAME='theme-configuration.json'; SKIPPED_NAME='theme-configuration-skipped.json'
 
 # Export format compatibility: kept aligned with bundled launcher engine 1.52.15.
-EXTERNAL_THEME_CREATOR_VERSION='0.9.83'
+from ExternalThemeCreatorVersion import get_workbench_version
+EXTERNAL_THEME_CREATOR_VERSION=get_workbench_version()
 UI_LAUNCHER_COMPAT_VERSION='1.52.15'
 RUNTIME_DIR_NAME='.ExternalThemeCreator_runtime'
 CC_LICENSES_DIR_NAME='CC_Licenses'
@@ -3851,7 +3852,7 @@ class ExportDialog(QtWidgets.QDialog):
         text('License Brief','license_terms',75)
         auto=QtWidgets.QGroupBox('Auto-generated Package Info');ag=QtWidgets.QFormLayout(auto);v.addWidget(auto)
         self.auto={}
-        for label,key,val in [('Schema Version','schema',THEME_SCHEMA_VERSION),('Package Type','type',THEME_PACKAGE_TYPE),('External Theme Creator Compatibility','launcher',UI_LAUNCHER_COMPAT_VERSION),('External Theme Creator Version','creator',EXTERNAL_THEME_CREATOR_VERSION),('Payload Encryption','encryption',THEME_PAYLOAD_ENCRYPTION),('Key Fingerprint','fingerprint','')]:
+        for label,key,val in [('Schema Version','schema',THEME_SCHEMA_VERSION),('Package Type','type',THEME_PACKAGE_TYPE),('Launcher Engine Version','launcher',UI_LAUNCHER_COMPAT_VERSION),('External Theme Creator Version','creator',EXTERNAL_THEME_CREATOR_VERSION),('Payload Encryption','encryption',THEME_PAYLOAD_ENCRYPTION),('Key Fingerprint','fingerprint','')]:
             w=QtWidgets.QLineEdit(val);w.setReadOnly(True);ag.addRow(label,w);self.auto[key]=w
         summary=QtWidgets.QGroupBox('Theme Folder Summary');sg=QtWidgets.QGridLayout(summary);v.addWidget(summary,1)
         self.summary={};rr=0
