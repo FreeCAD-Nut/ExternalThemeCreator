@@ -89,7 +89,8 @@ def _theme_creator_ui_category(parameter):
 UIL._theme_ui_category = _theme_creator_ui_category
 
 BRIDGE_VERSION = "0.9.3"
-EXTERNAL_THEME_CREATOR_PACKAGE_VERSION = "0.9.83"
+from ExternalThemeCreatorVersion import get_workbench_version
+EXTERNAL_THEME_CREATOR_PACKAGE_VERSION = get_workbench_version()
 
 
 def _shared_settings_path() -> Path:
