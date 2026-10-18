@@ -60,6 +60,40 @@ def _monitor_dpr(screen):
     return max(dpr, 1.0)
 
 
+def _macos_hide_splash_dock_icon():
+    """A splash is an accessory window, not a second Dock application.
+
+    Use the macOS Cocoa runtime directly because FreeCAD's bundled Python does
+    not necessarily ship PyObjC. This is a best-effort appearance change; the
+    splash must continue to work if the runtime call is unavailable.
+    """
+    if sys.platform != 'darwin':
+        return
+    try:
+        import ctypes
+        from ctypes.util import find_library
+        objc = ctypes.CDLL(find_library('objc') or '/usr/lib/libobjc.A.dylib')
+        objc.objc_getClass.argtypes = [ctypes.c_char_p]
+        objc.objc_getClass.restype = ctypes.c_void_p
+        objc.sel_registerName.argtypes = [ctypes.c_char_p]
+        objc.sel_registerName.restype = ctypes.c_void_p
+        objc.objc_msgSend.argtypes = [ctypes.c_void_p, ctypes.c_void_p]
+        objc.objc_msgSend.restype = ctypes.c_void_p
+        nsapp = objc.objc_msgSend(objc.objc_getClass(b'NSApplication'),
+                                 objc.sel_registerName(b'sharedApplication'))
+        if not nsapp:
+            return
+        # NSApplicationActivationPolicyAccessory = 1. No Dock icon, but
+        # accessory windows (including QSplashScreen) remain permitted.
+        objc.objc_msgSend.argtypes = [ctypes.c_void_p, ctypes.c_void_p, ctypes.c_long]
+        objc.objc_msgSend.restype = ctypes.c_bool
+        success = objc.objc_msgSend(nsapp,
+                                    objc.sel_registerName(b'setActivationPolicy:'), 1)
+        print('macOS splash accessory policy applied:', bool(success), flush=True)
+    except Exception as exc:
+        print('macOS splash accessory policy unavailable:', repr(exc), flush=True)
+
+
 def main():
     if len(sys.argv) != 3:
         return 2
@@ -70,6 +104,7 @@ def main():
     print('Splash helper Qt plugin path:', os.environ.get('QT_QPA_PLATFORM_PLUGIN_PATH', '<unset>'), flush=True)
     from PySide6 import QtCore, QtGui, QtWidgets
     app = QtWidgets.QApplication.instance() or QtWidgets.QApplication([sys.argv[0]])
+    _macos_hide_splash_dock_icon()
     pixmap = QtGui.QPixmap(str(source))
     if pixmap.isNull():
         return 3
@@ -89,11 +124,13 @@ def main():
     splash.clearMask()
     app.processEvents()
     Path(str(stop)+'.ready').write_text('ready', encoding='ascii')
-    print('Splash helper ready', flush=True)
+    print('Splash helper ready pid=%s stop=%s' % (os.getpid(), stop), flush=True)
     started = time.monotonic()
     timer = QtCore.QTimer()
     def check():
         if stop.exists() or time.monotonic() - started > 110:
+            print('Splash helper closing: ' + ('stop signal' if stop.exists() else 'safety timeout'), flush=True)
+            timer.stop()
             splash.close()
             app.quit()
     timer.timeout.connect(check)

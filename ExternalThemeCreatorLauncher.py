@@ -1659,6 +1659,11 @@ def _find_freecad_python(freecad_exe: Path) -> Path | None:
     names = ('pythonw.exe', 'python.exe') if os.name == 'nt' else ('python3', 'python')
     roots = [folder, folder / 'bin', folder.parent, folder.parent / 'bin',
              folder.parent / 'Library' / 'bin', folder.parent.parent / 'bin']
+    if platform.system().lower() == 'darwin':
+        for ancestor in (folder, *folder.parents):
+            if ancestor.name == 'Contents' and ancestor.parent.suffix.lower() == '.app':
+                roots.insert(0, ancestor / 'Resources' / 'bin')
+                break
     running = Path(sys.executable).resolve() if sys.executable else None
     if running and running.is_file():
         # Prefer FreeCAD's actual running interpreter, when it belongs to this install.
@@ -1690,6 +1695,8 @@ def _freecad_qt_platform_plugins(freecad_exe: Path, python_exe: Path) -> Path | 
     tails = (
         # FreeCAD conda-forge/Windows layout: <installation>/lib/qt6/plugins.
         'lib/qt6/plugins/platforms',
+        'plugins/platforms',
+        'lib/python3.13/site-packages/PySide6/Qt/plugins/platforms',
         'Lib/site-packages/PySide6/plugins/platforms',
         'Lib/site-packages/PySide6/Qt/plugins/platforms',
         'Lib/site-packages/PySide6/Qt6/plugins/platforms',
@@ -1707,7 +1714,7 @@ def _freecad_qt_platform_plugins(freecad_exe: Path, python_exe: Path) -> Path | 
             if key in inspected:
                 continue
             inspected.add(key)
-            if (location / ('qwindows.dll' if os.name == 'nt' else 'libqxcb.so')).is_file():
+            if (location / ('qwindows.dll' if os.name == 'nt' else 'libqcocoa.dylib' if sys.platform == 'darwin' else 'libqxcb.so')).is_file():
                 return location
     return None
 
@@ -2005,6 +2012,50 @@ def _apply_stylesheet() -> None:
 QtCore.QTimer.singleShot(0, _apply_stylesheet)
 """
     script_path.write_text(script_text, encoding="utf-8")
+    return script_path
+
+
+def _make_packaged_theme_scripts_startup(script_path: Path, theme_folder: Path) -> Path:
+    """Load a signed package's optional scripts in the newly started FreeCAD GUI.
+
+    Develop-theme script startup is provided by ExternalThemeCreatorRuntime.
+    Packaged themes launch through this engine on every OS (including direct
+    AppImage restart and prepared shortcuts), so install their scripts here.
+    """
+    script_path.parent.mkdir(parents=True, exist_ok=True)
+    # This is the installed workbench's own ThemeScriptManager, not a module
+    # imported from the theme package or a temporary AppImage mount location.
+    manager_directory = Path(__file__).resolve().parent
+    macro_text = f"""from __future__ import annotations
+import sys
+try:
+    from PySide import QtCore
+except ImportError:
+    from PySide6 import QtCore
+import FreeCAD as App
+import FreeCADGui as Gui
+THEME_FOLDER = {str(theme_folder.resolve())!r}
+MANAGER_DIRECTORY = {str(manager_directory)!r}
+
+def _start_packaged_theme_scripts(retries=0):
+    try:
+        if Gui.getMainWindow() is None:
+            if retries < 40:
+                QtCore.QTimer.singleShot(250, lambda: _start_packaged_theme_scripts(retries + 1))
+            else:
+                App.Console.PrintError("External Theme Creator: theme script startup timed out waiting for FreeCAD GUI.\\n")
+            return
+        if MANAGER_DIRECTORY not in sys.path:
+            sys.path.insert(0, MANAGER_DIRECTORY)
+        import ThemeScriptManager as TSM
+        TSM.install_from_folder(THEME_FOLDER)
+    except Exception:
+        import traceback
+        App.Console.PrintError("External Theme Creator: packaged theme scripts failed to load:\\n" + traceback.format_exc())
+
+QtCore.QTimer.singleShot(500, _start_packaged_theme_scripts)
+"""
+    script_path.write_text(macro_text, encoding="utf-8")
     return script_path
 
 
@@ -2812,10 +2863,29 @@ class ThemeLauncherApp(tk.Tk):
 
     def _write_settings_file(self) -> None:
         self.settings_path.parent.mkdir(parents=True, exist_ok=True)
-        self.settings_path.write_text(
-            json.dumps(asdict(self.settings), indent=2, ensure_ascii=False),
-            encoding="utf-8",
-        )
+        # Preserve settings owned by the FreeCAD workbench (for example,
+        # theme_runtime_location), which are not AppSettings dataclass fields.
+        existing = {}
+        if self.settings_path.is_file():
+            try:
+                read_back = json.loads(self.settings_path.read_text(encoding="utf-8"))
+                if isinstance(read_back, dict):
+                    existing = read_back
+            except (OSError, ValueError):
+                pass
+        existing.update(asdict(self.settings))
+        # Use replace so a partially written JSON file cannot be observed.
+        import tempfile as _etc_tempfile
+        import os as _etc_os
+        fd, temporary = _etc_tempfile.mkstemp(prefix=".etc-settings-", suffix=".json", dir=str(self.settings_path.parent))
+        try:
+            with _etc_os.fdopen(fd, "w", encoding="utf-8") as stream:
+                json.dump(existing, stream, indent=2, ensure_ascii=False)
+                stream.write("\n")
+            _etc_os.replace(temporary, self.settings_path)
+        finally:
+            if _etc_os.path.exists(temporary):
+                _etc_os.unlink(temporary)
 
     def save_settings(self) -> None:
         self._collect_ui_to_settings()
@@ -3863,11 +3933,22 @@ class ThemeLauncherApp(tk.Tk):
                     permanent_cfg = _theme_state_dir(str(manifest["theme_id"])) / output_filename
                     permanent_cfg.parent.mkdir(parents=True, exist_ok=True)
                     if not permanent_cfg.exists():
-                        source_user_cfg = _default_freecad_user_cfg_path()
-                        if not source_user_cfg.exists() or not source_user_cfg.is_file():
+                        # Apply Theme must locate version-scoped FreeCAD profiles too
+                        # (for example ~/.config/FreeCAD/v1-1/user.cfg on Linux).
+                        # Prefer the selected FreeCAD build's reported config path.
+                        source_user_cfg = self._probe_freecad_user_cfg(resolved_freecad_executable)
+                        if source_user_cfg is None:
+                            candidates = [p for p in _freecad_user_cfg_candidates()
+                                          if p.is_file()]
+                            # Prefer the most recently modified profile if several
+                            # FreeCAD versions have their own user.cfg.
+                            if candidates:
+                                source_user_cfg = max(candidates, key=lambda p: p.stat().st_mtime)
+                        if source_user_cfg is None:
                             raise LauncherError(
                                 "FreeCAD's user.cfg was not found.\n\n"
-                                "Please launch FreeCAD normally once, close it, and then apply this theme again."
+                                "ETC checked FreeCAD's reported configuration path and "
+                                "the usual version-specific configuration directories."
                             )
                         _apply_theme_configuration(source_user_cfg, permanent_cfg, theme_config)
                     cfg_source = permanent_cfg
@@ -4124,6 +4205,7 @@ class ThemeLauncherApp(tk.Tk):
         if need_runtime_user_home:
             runtime_user_home = runtime_root / "user_home"
             runtime_user_home.mkdir(parents=True, exist_ok=True)
+            self._connect_user_workbenches(runtime_user_home)
 
         # v0.9.12+: avoid FreeCAD's legacy images:splash_image.png path.
         # v0.9.14+: the selected PNG is passed directly to FreeCAD without any
@@ -4146,6 +4228,10 @@ class ThemeLauncherApp(tk.Tk):
         helper_text_path, macro_path = self.write_reload_helper_files(runtime_root, runtime_user_home)
         runtime_startup_script_path: Path | None = None
         runtime_layout_script_path: Path | None = None
+        packaged_scripts_startup_path: Path | None = None
+        # This flag is specific to applying a distributable .fctheme package.
+        # The Develop Theme script switch must not control packaged theme scripts.
+        is_packaged_theme = source_label.startswith("Theme File:")
         resolved_freecad_executable, raw_exe_text = self._resolve_effective_freecad_executable()
         if resolved_freecad_executable is None or not resolved_freecad_executable.exists():
             if raw_exe_text:
@@ -4176,6 +4262,12 @@ class ThemeLauncherApp(tk.Tk):
         if runtime_layout_instructions:
             runtime_layout_script_path = runtime_root / "apply_runtime_ui_layout.FCMacro"
             _make_startup_layout_script(runtime_layout_script_path, runtime_layout_instructions)
+        packaged_scripts_dir = theme_folder / "scripts"
+        if (is_packaged_theme and packaged_scripts_dir.is_dir() and
+                any(item.is_file() and item.suffix.lower() == ".py"
+                    for item in packaged_scripts_dir.iterdir())):
+            packaged_scripts_startup_path = runtime_root / "apply_packaged_theme_scripts.FCMacro"
+            _make_packaged_theme_scripts_startup(packaged_scripts_startup_path, theme_folder)
         extra_args = self.settings.extra_cli_args.strip()
         if extra_args:
             cmd.extend(shlex.split(extra_args, posix=(platform.system().lower() != "windows")))
@@ -4183,6 +4275,8 @@ class ThemeLauncherApp(tk.Tk):
             cmd.append(str(runtime_startup_script_path))
         if runtime_layout_script_path is not None:
             cmd.append(str(runtime_layout_script_path))
+        if packaged_scripts_startup_path is not None:
+            cmd.append(str(packaged_scripts_startup_path))
         env = os.environ.copy()
         # Do not inherit theme injection from an already-themed FreeCAD session.
         # An unchecked icon option must disable it even when restarting from NUT.
@@ -4194,6 +4288,11 @@ class ThemeLauncherApp(tk.Tk):
             env.pop('FREECAD_USER_HOME', None)
         if runtime_user_home is not None:
             env["FREECAD_USER_HOME"] = str(runtime_user_home)
+        if is_packaged_theme:
+            # Avoid inheriting a different Develop Theme session's script target
+            # or disabled-script switch when Apply Theme starts from that session.
+            env["EXTERNAL_THEME_CREATOR_THEME_FOLDER"] = str(theme_folder.resolve())
+            env["EXTERNAL_THEME_CREATOR_UI_SCRIPTS_ENABLED"] = "1" if packaged_scripts_startup_path else "0"
         if self.settings.enable_external_icon_theme and icon_theme_root is not None:
             env["FREECAD_EXTERNAL_ICON_THEME"] = str(icon_theme_root.resolve())
             env["FREECAD_EXTERNAL_ICON_THEME_ENABLED"] = "1"
@@ -4214,6 +4313,8 @@ class ThemeLauncherApp(tk.Tk):
             summary.append(f"Startup stylesheet script: {runtime_startup_script_path}")
         if runtime_layout_script_path is not None:
             summary.append(f"Startup semantic layout script: {runtime_layout_script_path}")
+        if packaged_scripts_startup_path is not None:
+            summary.append(f"Startup packaged-theme scripts: {packaged_scripts_startup_path}")
         if runtime_splash_paths:
             summary.append("Splash source passed to FreeCAD:")
             for splash_target in runtime_splash_paths:
@@ -4471,6 +4572,67 @@ class ThemeLauncherApp(tk.Tk):
             start_new_session=True,
         )
 
+    @staticmethod
+    def _connect_user_workbenches(isolated_home: Path) -> None:
+        """Expose installed user workbenches in a themed FreeCAD user home.
+
+        Never copy or move workbenches. Only create links within a profile that
+        ETC owns. Existing user Mod entries are always left untouched.
+        """
+        home = Path.home()
+        system = platform.system().lower()
+        if system == 'windows':
+            roaming = Path(os.environ.get('APPDATA', home / 'AppData' / 'Roaming'))
+            roots = [roaming / 'FreeCAD']
+        elif system == 'darwin':
+            roots = [home / 'Library' / 'Application Support' / 'FreeCAD',
+                     home / 'Library' / 'Preferences' / 'FreeCAD',
+                     home / '.local' / 'share' / 'FreeCAD']
+        else:
+            roots = [Path(os.environ.get('XDG_DATA_HOME', home / '.local' / 'share')) / 'FreeCAD',
+                     home / '.local' / 'share' / 'FreeCAD']
+        sources = []
+        for root in roots:
+            locations = [root]
+            if root.is_dir():
+                try:
+                    locations.extend(child for child in root.iterdir() if child.is_dir() and
+                                     child.name.startswith(('v1-', 'v0-', 'v2-')))
+                except OSError:
+                    pass
+            for location in locations:
+                mod = location / 'Mod'
+                if mod.is_dir() and mod.resolve() != (isolated_home / 'Mod').resolve() and mod not in sources:
+                    sources.append(mod)
+        if not sources:
+            return
+        target = isolated_home / 'Mod'
+        # Fast path for a single conventional Mod directory.
+        if len(sources) == 1 and not target.exists() and not target.is_symlink():
+            try:
+                target.symlink_to(sources[0], target_is_directory=True)
+                return
+            except OSError:
+                pass
+        target.mkdir(parents=True, exist_ok=True)
+        for source in sources:
+            try:
+                children = list(source.iterdir())
+            except OSError:
+                continue
+            for child in children:
+                if not child.is_dir():
+                    continue
+                link = target / child.name
+                if link.exists() or link.is_symlink():
+                    continue
+                try:
+                    link.symlink_to(child, target_is_directory=True)
+                except OSError:
+                    # Windows users may not have permission to create symlinks.
+                    # Do not copy files or modify the source workbench.
+                    continue
+
     def _launch_with_prepared_theme(
         self,
         theme_folder: Path,
@@ -4499,6 +4661,7 @@ class ThemeLauncherApp(tk.Tk):
         if source_label.startswith("Theme File:"):
             applied_home = cfg_source.resolve().parent / "user_home"
             applied_home.mkdir(parents=True, exist_ok=True)
+            self._connect_user_workbenches(applied_home)
             env["FREECAD_USER_HOME"] = str(applied_home)
             summary += "\nApplied theme user home: " + str(applied_home)
         self.clear_status()
@@ -4526,7 +4689,10 @@ class ThemeLauncherApp(tk.Tk):
             splash_handle = _start_native_pixel_splash(freecad_exe, splash_source, theme_folder / RUNTIME_DIR_NAME)
             if splash_handle:
                 try:
-                    cmd, suppressed_cfg = _prepare_suppressed_splash_launch(cmd, cfg_source, theme_folder / RUNTIME_DIR_NAME)
+                    from ExternalThemeCreatorSplashControl import _macos_dock_icon_path
+                    cmd, suppressed_cfg = _prepare_suppressed_splash_launch(
+                        cmd, cfg_source, theme_folder / RUNTIME_DIR_NAME,
+                        dock_icon_path=_macos_dock_icon_path(theme_folder) if sys.platform == 'darwin' else None)
                 except Exception:
                     _stop_native_pixel_splash(splash_handle)
                     raise
@@ -4535,6 +4701,12 @@ class ThemeLauncherApp(tk.Tk):
                 _splash_diagnostic(theme_folder / RUNTIME_DIR_NAME, 'MODE: FreeCAD native splash fallback')
         else:
             _splash_diagnostic(theme_folder / RUNTIME_DIR_NAME, 'Splash disabled or no themed splash; CFG left untouched')
+        mac_ready = None
+        if sys.platform == 'darwin':
+            from ExternalThemeCreatorSplashControl import _macos_bundle_launch, _macos_dock_icon_path
+            cmd, env, mac_ready = _macos_bundle_launch(
+                cmd, env, theme_folder / RUNTIME_DIR_NAME,
+                _macos_dock_icon_path(theme_folder))
         try:
             process = subprocess.Popen(cmd, env=env)
         except Exception:
@@ -4547,7 +4719,11 @@ class ThemeLauncherApp(tk.Tk):
             # FreeCAD writes directly to cfg_source. The post-exit helper is now
             # needed only to remove an extracted temporary theme, if applicable.
             self._spawn_post_exit_helper(process.pid, None, None, cleanup_dir)
-            ready = self._wait_for_freecad_ready(process)
+            if mac_ready is not None:
+                from ExternalThemeCreatorSplashControl import _wait_macos_gui_ready
+                ready = _wait_macos_gui_ready(process, mac_ready, pump=self.update)
+            else:
+                ready = self._wait_for_freecad_ready(process)
             _stop_native_pixel_splash(splash_handle)
             if ready:
                 self.destroy()
@@ -4556,7 +4732,11 @@ class ThemeLauncherApp(tk.Tk):
         self.append_status("\nFreeCAD started. Changes are saved directly to the persistent theme configuration.")
         self.update_idletasks()
         if splash_handle:
-            self._wait_for_freecad_ready(process)
+            if mac_ready is not None:
+                from ExternalThemeCreatorSplashControl import _wait_macos_gui_ready
+                _wait_macos_gui_ready(process, mac_ready, pump=self.update)
+            else:
+                self._wait_for_freecad_ready(process)
             _stop_native_pixel_splash(splash_handle)
         process.wait()
         if _safe_rmtree(cleanup_dir):
@@ -5003,7 +5183,7 @@ class ThemeLauncherApp(tk.Tk):
             stderr=subprocess.DEVNULL,
         )
 
-    def _create_macos_shortcut(self, shortcut_path: Path, target_path: Path, arguments: list[str], icon_path: Path | None) -> None:
+    def _create_macos_shortcut(self, shortcut_path: Path, target_path: Path, arguments: list[str], icon_path: Path | None, macos_splash_spec: dict | None = None) -> None:
         persistent_icon_path = _make_shortcut_icon_persistent(shortcut_path, icon_path)
         app_dir = shortcut_path
         contents = app_dir / "Contents"
@@ -5019,12 +5199,107 @@ class ThemeLauncherApp(tk.Tk):
         else:
             command_parts = [str(target_path)] + arguments
             working_dir = target_path.parent
-        launcher_script.write_text(
-            "#!/bin/sh\n"
-            f'cd "{str(working_dir)}" || exit 1\n'
-            f'exec {_shell_join(command_parts)}\n',
-            encoding="utf-8",
-        )
+        if target_path == Path('/usr/bin/open') and arguments[:2] == ['-n', '-a']:
+            # A direct Develop Theme shortcut launches the actual FreeCAD.app
+            # through Launch Services; it does not read the protected folder
+            # using a standalone Python subprocess. Keep a small error log for
+            # broken FreeCAD app paths or failed Launch Services requests.
+            log_path = _app_config_base_dir() / 'MacShortcuts' / 'develop-shortcut-direct.log'
+            log_path.parent.mkdir(parents=True, exist_ok=True)
+            error_alert = shlex.quote(
+                'display alert "External Theme Creator" message '
+                '"FreeCAD did not launch. See the Develop Theme shortcut log in Application Support." as critical'
+            )
+            launcher_text = (
+                '#!/bin/sh\n'
+                f'cd {shlex.quote(str(working_dir))} || exit 1\n'
+                f'echo "$(date): Launching direct FreeCAD.app shortcut" >> {shlex.quote(str(log_path))}\n'
+                f'{_shell_join(command_parts)} >> {shlex.quote(str(log_path))} 2>&1\n'
+                'status="$?"\n'
+                'if [ "$status" -ne 0 ]; then\n'
+                f'  /usr/bin/osascript -e {error_alert} >/dev/null 2>&1 || true\n'
+                'fi\n'
+                'exit "$status"\n'
+            )
+            if macos_splash_spec:
+                # Keep the splash's source PNG in Application Support rather
+                # than opening the privacy-protected development folder from
+                # Finder. Use FreeCAD's own Python/PySide6 to match Restart's
+                # exact pixel-ratio behavior, and close at GUI readiness.
+                spec = macos_splash_spec
+                q = shlex.quote
+                splash_python = q(spec['python'])
+                splash_helper = q(spec['helper'])
+                splash_image = q(spec['image'])
+                splash_ready = q(spec['ready'])
+                splash_dir = q(spec['directory'])
+                plugin_dir = spec.get('plugin_directory') or ''
+                plugin_prefix = (
+                    'QT_QPA_PLATFORM_PLUGIN_PATH=' + q(plugin_dir) + ' '
+                    + 'QT_PLUGIN_PATH=' + q(str(Path(plugin_dir).parent)) + ' '
+                    if plugin_dir else ''
+                )
+                launcher_text = (
+                    '#!/bin/sh\n'
+                    f'cd {q(str(working_dir))} || exit 1\n'
+                    f'mkdir -p {splash_dir}\n'
+                    f'rm -f {splash_ready}\n'
+                    f'splash_stop={q(spec["directory"] + "/splash_stop_")}$$.flag\n'
+                    'rm -f "$splash_stop" "$splash_stop.ready"\n'
+                    f'{plugin_prefix}{splash_python} {splash_helper} {splash_image} "$splash_stop" >> {q(str(log_path))} 2>&1 &\n'
+                    'splash_pid=$!\n'
+                    # Wait briefly for Qt to paint the correctly sized splash.
+                    'i=0\n'
+                    'while [ ! -f "$splash_stop.ready" ] && kill -0 "$splash_pid" 2>/dev/null && [ "$i" -lt 28 ]; do\n'
+                    '  sleep 0.25; i=$((i+1))\n'
+                    'done\n'
+                    f'echo "$(date): Launching direct FreeCAD.app shortcut" >> {q(str(log_path))}\n'
+                    f'{_shell_join(command_parts)} >> {q(str(log_path))} 2>&1\n'
+                    'status="$?"\n'
+                    'if [ "$status" -eq 0 ]; then\n'
+                    '  i=0\n'
+                    f'  while [ ! -f {splash_ready} ] && [ "$i" -lt 140 ]; do\n'
+                    '    sleep 0.25; i=$((i+1))\n'
+                    '  done\n'
+                    'else\n'
+                    f'  /usr/bin/osascript -e {error_alert} >/dev/null 2>&1 || true\n'
+                    'fi\n'
+                    'touch "$splash_stop"\n'
+                    # macOS Qt sometimes leaves a helper alive after the stop
+                    # marker is seen; bound shutdown instead of waiting forever.
+                    'i=0\n'
+                    'while kill -0 "$splash_pid" 2>/dev/null && [ "$i" -lt 12 ]; do\n'
+                    '  sleep 0.25; i=$((i+1))\n'
+                    'done\n'
+                    'if kill -0 "$splash_pid" 2>/dev/null; then\n'
+                    '  kill "$splash_pid" 2>/dev/null || true\n'
+                    '  sleep 0.5\n'
+                    '  kill -9 "$splash_pid" 2>/dev/null || true\n'
+                    'fi\n'
+                    'wait "$splash_pid" 2>/dev/null || true\n'
+                    'rm -f "$splash_stop" "$splash_stop.ready"\n'
+                    'exit "$status"\n'
+                )
+        elif '--launch-macos-creator-shortcut' in arguments:
+            # Finder does not show the stderr of a bundled Python interpreter.
+            # Persist its entire launch output even if Python cannot import
+            # the ETC runtime (too early for its own diagnostics to run).
+            log_path = _app_config_base_dir() / 'MacShortcuts' / 'develop-shortcut-process.log'
+            log_path.parent.mkdir(parents=True, exist_ok=True)
+            launcher_text = (
+                "#!/bin/sh\n"
+                f'cd {shlex.quote(str(working_dir))} || exit 1\n'
+                f'echo "$(date): Launching Develop Theme shortcut" >> {shlex.quote(str(log_path))}\n'
+                f'{_shell_join(command_parts)} >> {shlex.quote(str(log_path))} 2>&1\n'
+                'exit "$?"\n'
+            )
+        else:
+            launcher_text = (
+                "#!/bin/sh\n"
+                f'cd {shlex.quote(str(working_dir))} || exit 1\n'
+                f'exec {_shell_join(command_parts)}\n'
+            )
+        launcher_script.write_text(launcher_text, encoding="utf-8")
         os.chmod(launcher_script, 0o755)
 
         icon_file_name = ""
@@ -5037,15 +5312,18 @@ class ThemeLauncherApp(tk.Tk):
             icon_plist_block = f"    <key>CFBundleIconFile</key>\n    <string>{icon_file_name}</string>\n"
 
         info_plist = contents / "Info.plist"
+        from xml.sax.saxutils import escape as xml_escape
+        bundle_slug = (_slugify_theme_id(shortcut_path.stem).replace('_', '-') or 'freecad')[:52]
+        bundle_key = hashlib.sha256(str(shortcut_path.resolve()).encode('utf-8')).hexdigest()[:10]
         plist_text = (
             "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n"
             "<!DOCTYPE plist PUBLIC \"-//Apple//DTD PLIST 1.0//EN\" \"http://www.apple.com/DTDs/PropertyList-1.0.dtd\">\n"
             "<plist version=\"1.0\">\n"
             "<dict>\n"
-            f"    <key>CFBundleDisplayName</key>\n    <string>{shortcut_path.stem}</string>\n"
-            f"    <key>CFBundleExecutable</key>\n    <string>{shortcut_path.stem}</string>\n"
-            f"    <key>CFBundleIdentifier</key>\n    <string>com.ui.launcher.shortcut.{shortcut_path.stem.lower().replace(' ', '-')}</string>\n"
-            f"    <key>CFBundleName</key>\n    <string>{shortcut_path.stem}</string>\n"
+            f"    <key>CFBundleDisplayName</key>\n    <string>{xml_escape(shortcut_path.stem)}</string>\n"
+            f"    <key>CFBundleExecutable</key>\n    <string>{xml_escape(shortcut_path.stem)}</string>\n"
+            f"    <key>CFBundleIdentifier</key>\n    <string>com.externalthemecreator.shortcut.{bundle_slug}.{bundle_key}</string>\n"
+            f"    <key>CFBundleName</key>\n    <string>{xml_escape(shortcut_path.stem)}</string>\n"
             "    <key>CFBundlePackageType</key>\n    <string>APPL</string>\n"
             f"{icon_plist_block}"
             "</dict>\n"

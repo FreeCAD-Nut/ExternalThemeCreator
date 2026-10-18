@@ -7,7 +7,7 @@ assert (root / "InitGui.py").is_file()
 assert (root / "Init.py").is_file()
 manifest = ET.parse(root / "package.xml").getroot()
 ns = {"p": "https://wiki.freecad.org/Package_Metadata"}
-assert manifest.findtext("p:version", namespaces=ns) == "0.9.85"
+assert manifest.findtext("p:version", namespaces=ns) == "0.9.86"
 assert manifest.findtext("p:icon", namespaces=ns) == "Resources/icons/ETC_export.svg"
 assert manifest.findtext("p:content/p:workbench/p:classname", namespaces=ns) == "ExternalThemeCreatorWorkbench"
 for icon in manifest.findall(".//p:icon", ns):

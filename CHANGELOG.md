@@ -1,5 +1,19 @@
 # Changelog
 
+## 0.9.86 — Cross-platform launch and theme handling (2026-10-18)
+
+- Port Linux-validated Apply Theme, Develop Theme, packaged script loading, workbench discovery, and AppImage restarts/shortcuts to the consolidated workbench.
+- Improve Linux AppImage executable discovery, child-process environment cleanup, user workbench linking, and selective handling of development `.cfg` files.
+- Improve FreeCAD application-bundle and bundled-Python detection for macOS Intel and Apple Silicon, with architecture-separated private `cryptography` dependencies.
+- Correct macOS application shortcut preparation, protected-folder access, command quoting, and persistent Apply Theme package snapshots.
+- Preserve live development QSS, icons, scripts, and configuration while preparing macOS Develop Theme shortcut launch data; document its shortcut-specific configuration snapshot.
+- Consolidate macOS FreeCAD startup macros, native-splash suppression, custom splash shutdown, and splash helper Dock behavior.
+- Launch macOS FreeCAD via its application bundle rather than a bare `exec` process, including the detached Develop Theme Restart helper.
+- Restore theme-specific macOS Dock icons in Apply/Develop Restart and desktop shortcut flows.
+- Preserve separate Apply Theme and Develop Theme runtime behavior, settings persistence, licensing, and theme startup scripts.
+
+The macOS Intel launch paths and Linux AppImage workflows were exercised during testing. Apple Silicon testing was also completed by the maintainer; detailed per-platform FreeCAD/Python/Qt build information is not included in this release history. This update is not equivalent to a comprehensive security audit or an official FreeCAD Addon Index approval.
+
 ## 0.9.85 — GitHub release candidate (2026-10-17)
 
 - Set `ETC_export.svg` as the FreeCAD workbench selector icon and `package.xml` icon.

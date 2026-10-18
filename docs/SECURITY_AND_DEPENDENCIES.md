@@ -18,7 +18,7 @@ The main workbench imports FreeCAD and the Qt APIs shipped with FreeCAD. For cry
 
 ## Platform support
 
-Windows contains explicitly platform-specific relaunch, PowerShell and shortcut logic. Other-platform branches exist in the source but require independent testing. Document all tested combinations, including FreeCAD build, Qt and Python versions.
+Windows contains explicitly platform-specific relaunch, PowerShell and shortcut logic. Linux AppImage and macOS Intel launch workflows have undergone real-world testing. The maintainer also completed Apple Silicon testing for v0.9.86. Other packaging and FreeCAD/Qt/Python combinations still require independent validation; document exact versions for reproducibility.
 
 ## Publication review gates
 

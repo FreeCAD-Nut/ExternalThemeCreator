@@ -375,7 +375,10 @@ def _current_freecad_executable():
     try:
         home=Path(App.getHomePath())
         if platform.system().lower()=='windows': candidates += [home/'bin'/'FreeCAD.exe',home/'FreeCAD.exe']
-        elif platform.system().lower()=='darwin': candidates += [home/'bin'/'FreeCAD',home/'MacOS'/'FreeCAD']
+        elif platform.system().lower()=='darwin':
+            candidates += [home/'bin'/'FreeCAD',home/'bin'/'freecad',
+                           home/'MacOS'/'FreeCAD',home.parent/'MacOS'/'FreeCAD',
+                           home.parent/'Resources'/'bin'/'freecad']
         else: candidates += [home/'bin'/'FreeCAD',home/'FreeCAD']
     except Exception: pass
     for c in candidates:
@@ -383,24 +386,48 @@ def _current_freecad_executable():
     raise LauncherError('Could not determine the executable of the currently running FreeCAD installation.')
 
 def _runtime_python(require_crypto=False):
+    """Find Python with tkinter, preferring the selected FreeCAD bundle.
+
+    macOS FreeCAD.app keeps its conda Python under Contents/Resources/bin,
+    not Contents/MacOS beside the application launcher.
+    """
     saved=params().GetString('RuntimePython','').strip();cands=[]
+    system=platform.system().lower()
     if saved:cands.append(Path(saved))
     try:
         fc=_current_freecad_executable();d=fc.parent
-        if platform.system().lower()=='windows': cands += [d/'python.exe',d/'pythonw.exe',d.parent/'bin'/'python.exe']
-        else: cands += [d/'python3',d/'python']
+        if system=='windows':
+            cands += [d/'python.exe',d/'pythonw.exe',d.parent/'bin'/'python.exe']
+        else:
+            roots=[d]
+            if system=='darwin':
+                # Typical bundle: FreeCAD.app/Contents/MacOS/FreeCAD and
+                # FreeCAD.app/Contents/Resources/bin/python.
+                for ancestor in [d,*d.parents]:
+                    if ancestor.name == 'Contents' and ancestor.parent.suffix.lower()=='.app':
+                        roots.insert(0,ancestor/'Resources'/'bin')
+                        break
+                roots.extend([d.parent/'bin',d.parent/'Resources'/'bin'])
+            for root in roots:
+                cands.extend(root/name for name in ('python','python3',
+                    'python%d.%d' % sys.version_info[:2]))
     except Exception: pass
-    for name in (['python','python3'] if platform.system().lower()=='windows' else ['python3','python']):
+    if system=='darwin':
+        # macOS Homebrew paths are not always on PATH in GUI-launched apps.
+        for root in (Path('/opt/homebrew/bin'),Path('/usr/local/bin'),Path('/usr/bin')):
+            cands.extend(root/name for name in ('python3','python'))
+    for name in (['python','python3'] if system=='windows' else ['python3','python']):
         found=shutil.which(name)
         if found:cands.append(Path(found))
     seen=set();code='import tkinter'
     for c in cands:
         try:
             key=os.path.normcase(str(c.resolve()))
-            if key in seen or not c.exists():continue
+            if key in seen or not c.is_file():continue
             seen.add(key)
             flags=getattr(subprocess,'CREATE_NO_WINDOW',0) if os.name=='nt' else 0
-            r=subprocess.run([str(c),'-c',code],stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL,timeout=8,creationflags=flags)
+            r=subprocess.run([str(c),'-c',code],stdout=subprocess.DEVNULL,
+                             stderr=subprocess.DEVNULL,timeout=8,creationflags=flags)
             if r.returncode==0:
                 if require_crypto:
                     dep=_tc_deps.prepare_interpreter(c,mw())
@@ -409,8 +436,11 @@ def _runtime_python(require_crypto=False):
                 params().SetString('RuntimePython',str(c.resolve()));return c.resolve()
         except LauncherError: raise
         except Exception: pass
-    need=' with tkinter' 
-    raise LauncherError('External Theme Creator could not find a Python interpreter'+need+'.\n\nThe embedded runtime uses the proven bundled launcher engine 1.52.15 launch engine. Select/install a Python interpreter that provides these modules, then try again.')
+    hint=('On macOS, check whether the bundled FreeCAD Python at '
+          'FreeCAD.app/Contents/Resources/bin/python supports tkinter.'
+          if system=='darwin' else
+          'Select a Python interpreter with tkinter. No FreeCAD files will be modified.')
+    raise LauncherError('External Theme Creator could not find a Python interpreter with tkinter.\n\n'+hint)
 
 def _load_runtime_settings():
     sp=_runtime_settings_path()
@@ -662,7 +692,13 @@ def _prepare_creator_launch(source):
 def _helper_python():
     try:
         fc=_current_freecad_executable(); d=fc.parent
-        cands=[d/'python.exe',d/'pythonw.exe'] if os.name=='nt' else [d/'python3',d/'python']
+        cands=[d/'python.exe',d/'pythonw.exe'] if os.name=='nt' else [d/'python',d/'python3']
+        if platform.system().lower()=='darwin':
+            for ancestor in [d,*d.parents]:
+                if ancestor.name=='Contents' and ancestor.parent.suffix.lower()=='.app':
+                    cands[:0]=[ancestor/'Resources'/'bin'/'python',
+                               ancestor/'Resources'/'bin'/'python3']
+                    break
         for c in cands:
             if c.is_file(): return c
     except Exception: pass
@@ -671,15 +707,57 @@ def _helper_python():
     if found:return Path(found)
     raise LauncherError('Could not locate a Python interpreter for the restart helper.')
 
+def _appimage_restart_python():
+    """Detached restart helper must outlive the AppImage FUSE mount."""
+    for candidate in ('/usr/bin/python3', shutil.which('python3'), shutil.which('python')):
+        if not candidate:
+            continue
+        path = Path(candidate)
+        if path.is_file() and os.access(path, os.X_OK) and not str(path).startswith('/tmp/.mount_'):
+            return path
+    raise LauncherError('A persistent system Python 3 is required for an AppImage restart helper.')
+
+
+def _appimage_bootstrap(mode):
+    from ExternalThemeCreatorAppImage import make_bootstrap
+    return make_bootstrap(mode, Path(__file__).resolve().with_name('ExternalThemeCreatorRuntime.py'))
+
+
 def _spawn_prepared_launch(cmd,env,preview,wait_pid=None,log_path=None,theme_splash=None):
     # The Workbench's Restart with theme bypasses UI_Launcher's normal Launch
     # button. Its detached restart helper must therefore start the custom
     # splash explicitly, after the existing FreeCAD process has exited.
     preview.mkdir(parents=True, exist_ok=True)
     preflight=preview/'splash-startup.log'
+    # macOS does not expose a Windows-style EnumWindows API. Let the new
+    # FreeCAD session signal its own GUI readiness so its custom splash is not
+    # left onscreen for the legacy 100-second timeout.
+    mac_ready = None
+    if platform.system().lower() == 'darwin' and theme_splash:
+        mac_ready = preview / 'macos-freecad-ready.flag'
+        try: mac_ready.unlink(missing_ok=True)
+        except OSError: pass
+        ready_macro = preview / 'signal_macos_gui_ready.FCMacro'
+        ready_macro.write_text("""import FreeCADGui as Gui
+from pathlib import Path
+try:
+    from PySide import QtCore
+except ImportError:
+    from PySide6 import QtCore
+READY_FILE = Path(%r)
+def _etc_macos_ready():
+    mw = Gui.getMainWindow()
+    if mw is not None and mw.isVisible():
+        QtCore.QTimer.singleShot(900, lambda: READY_FILE.write_text('ready', encoding='ascii'))
+    else:
+        QtCore.QTimer.singleShot(250, _etc_macos_ready)
+QtCore.QTimer.singleShot(750, _etc_macos_ready)
+""" % repr(str(mac_ready)), encoding='utf-8')
+        cmd = list(cmd) + [str(ready_macro)]
     spec=preview/'restart_spec.json'
     spec.write_text(json.dumps({
         'cmd':cmd,'env':env,'cwd':str(Path(cmd[0]).parent),
+        'splash_ready': str(mac_ready) if mac_ready else '',
         'wait_pid':int(wait_pid or 0),'child_log':str(log_path) if log_path else '',
         'splash_image':str(theme_splash) if theme_splash else '',
         'runtime_root':str(preview),
@@ -695,6 +773,7 @@ def event(msg):
     with (root/'splash-startup.log').open('a',encoding='utf-8') as f:
         f.write(time.strftime('%Y-%m-%d %H:%M:%S')+' RESTART '+msg+'\n')
 event('Detached helper entered; pid='+str(os.getpid()))
+event('Waiting for pid='+str(spec.get('wait_pid') or 0))
 pid=int(spec.get('wait_pid') or 0)
 if pid:
     if os.name=='nt':
@@ -708,9 +787,18 @@ if pid:
                 try: os.kill(pid,0);time.sleep(.25)
                 except OSError: break
     else:
+        started=time.monotonic()
         while True:
-            try: os.kill(pid,0);time.sleep(.25)
+            try:
+                os.kill(pid,0)
+                stat=Path('/proc')/str(pid)/'stat'
+                if stat.exists() and stat.read_text().split(') ',1)[-1].startswith('Z'): break
+                if time.monotonic()-started>90:
+                    event('ERROR: original FreeCAD pid did not exit in 90 seconds')
+                    sys.exit(3)
+                time.sleep(.25)
             except OSError: break
+event('Original process exited; preparing new launch')
 splash_handle=None
 splash_api=None
 suppressed_cfg=None
@@ -728,6 +816,24 @@ if spec.get('splash_image'):
             event('FALLBACK: requested splash file missing')
         if splash_handle:
             spec['cmd'],suppressed_cfg=splash_api['_prepare_suppressed_splash_launch'](spec['cmd'],cfg,root)
+            # The readiness FCMacro was already added before the splash
+            # controller appended its separate preference-restoration macro.
+            # On macOS FreeCAD may execute only the final positional macro,
+            # leaving our readiness flag unwritten and the custom splash on
+            # screen. Combine both tasks into the ONE startup macro. The
+            # restore command must run before its readiness timer is queued.
+            if sys.platform=='darwin' and spec.get('splash_ready'):
+                readiness_macro=Path(spec['cmd'][-2])
+                restoration_macro=Path(spec['cmd'][-1])
+                if (readiness_macro.name=='signal_macos_gui_ready.FCMacro'
+                        and restoration_macro.name=='restore_theme_creator_splash_preference.FCMacro'):
+                    restored=restoration_macro.read_text(encoding='utf-8')
+                    original=readiness_macro.read_text(encoding='utf-8')
+                    readiness_macro.write_text(restored+'\n'+original,encoding='utf-8')
+                    spec['cmd'].pop()
+                    event('macOS: combined splash restoration and GUI readiness into one startup macro')
+                else:
+                    event('WARNING: unexpected startup macro order; cannot safely combine')
             event('FreeCAD native splash disabled in active theme CFG for startup; preference restored by startup macro')
             event('MODE: External Theme Creator native-resolution splash; native splash disabled')
         else:
@@ -739,6 +845,30 @@ if spec.get('splash_image'):
         splash_handle=None
 else:
     event('No custom splash requested for this launch')
+# macOS Develop Theme Restart previously bypassed the FreeCAD.app launch path
+# altogether: the detached helper launched Contents/MacOS/FreeCAD directly.
+# Apply Theme Restart, by contrast, ultimately uses _macos_bundle_launch.
+# Use that *same* proven launch transform here, AFTER splash restoration and
+# all developer macros have been added, so there is one FreeCAD.app instance,
+# one merged startup macro, and the same Dock icon / GUI readiness handling.
+# This branch is intentionally limited to Creator launches on macOS; Apply
+# Theme runs its own launcher and other operating systems remain unchanged.
+if sys.platform == 'darwin' and spec.get('theme_folder') and '--user-cfg' in spec['cmd']:
+    try:
+        if splash_api is None:
+            splash_api = runpy.run_path(spec['splash_control'], run_name='theme_creator_splash_api')
+        theme_folder = Path(spec['theme_folder'])
+        chosen_icon = splash_api['_macos_dock_icon_path'](theme_folder)
+        spec['cmd'], spec['env'], bundle_ready = splash_api['_macos_bundle_launch'](
+            spec['cmd'], spec['env'], root, chosen_icon)
+        spec['splash_ready'] = str(bundle_ready)
+        event('macOS Develop Restart uses FreeCAD.app; Dock icon=' + str(chosen_icon or 'none'))
+        event('macOS GUI readiness marker=' + str(bundle_ready))
+    except Exception:
+        event('ERROR: macOS bundle launch preparation failed: ' + traceback.format_exc())
+        if splash_handle:
+            splash_api['_stop_native_pixel_splash'](splash_handle)
+        raise
 logfile=spec.get('child_log')
 child_log=open(logfile,'a',encoding='utf-8') if logfile else subprocess.DEVNULL
 kwargs={'cwd':spec.get('cwd') or None,'env':spec['env'],'stdin':subprocess.DEVNULL,
@@ -746,6 +876,7 @@ kwargs={'cwd':spec.get('cwd') or None,'env':spec['env'],'stdin':subprocess.DEVNU
 if os.name=='nt': kwargs['creationflags']=getattr(subprocess,'CREATE_NEW_PROCESS_GROUP',0)|getattr(subprocess,'DETACHED_PROCESS',0)
 else: kwargs['start_new_session']=True
 try:
+    event('Launching command: '+repr(spec['cmd']))
     child=subprocess.Popen(spec['cmd'],**kwargs)
     event('FreeCAD launched pid='+str(child.pid))
 except Exception:
@@ -799,12 +930,20 @@ if splash_handle:
         if os.name=='nt' and visible_window_for_process(child.pid):
             event('FreeCAD main window detected; closing replacement splash')
             break
+        if sys.platform=='darwin':
+            ready_path=Path(spec['splash_ready']) if spec.get('splash_ready') else None
+            if ready_path and ready_path.is_file():
+                event('macOS FreeCAD GUI reported ready; closing replacement splash')
+                break
+            if time.monotonic()-start>30:
+                event('FALLBACK: macOS splash readiness timed out after 30 seconds')
+                break
         time.sleep(.2)
     splash_api['_stop_native_pixel_splash'](splash_handle)
     event('Splash stop requested')
 """,encoding='utf-8')
     try:
-        py=_helper_python()
+        py=_appimage_restart_python() if os.environ.get('APPIMAGE') and platform.system().lower()=='linux' else _helper_python()
         with preflight.open('a',encoding='utf-8') as out:
             out.write(datetime.now().isoformat(timespec='seconds')+' PARENT helper interpreter='+str(py)+'\n')
     except Exception as exc:
@@ -816,6 +955,11 @@ if splash_handle:
     kwargs.update(stdout=log,stderr=subprocess.STDOUT if log_path else subprocess.DEVNULL)
     if os.name=='nt':kwargs['creationflags']=getattr(subprocess,'CREATE_NO_WINDOW',0)|getattr(subprocess,'CREATE_NEW_PROCESS_GROUP',0)|getattr(subprocess,'DETACHED_PROCESS',0)
     else:kwargs['start_new_session']=True
+    if platform.system().lower()=='linux' and os.environ.get('APPIMAGE'):
+        helper_env=dict(os.environ)
+        for name in ('APPDIR','LD_LIBRARY_PATH','LD_PRELOAD','PYTHONHOME','PYTHONPATH'):
+            helper_env.pop(name,None)
+        kwargs['env']=helper_env
     try:
         proc=subprocess.Popen([str(py),str(helper),str(spec)],**kwargs)
         with preflight.open('a',encoding='utf-8') as out:
@@ -862,18 +1006,38 @@ def _restart_runtime(mode,source,keep_current_session=False,parent=None):
         return True
 
     # Packaged-theme restart keeps the bundled bundled launcher user-mode engine.
-    py=_runtime_python(require_crypto=True); arg='--launch-as-user'; launcher_script=_runtime_script(); base_cmd=[str(py),str(launcher_script),arg]
-    launch_cwd=str(launcher_script.parent); log_path=_runtime_config_dir()/'external-theme-creator-runtime.log'; log_path.parent.mkdir(parents=True,exist_ok=True)
+    direct_appimage = bool(platform.system().lower() == 'linux' and os.environ.get('APPIMAGE'))
+    if direct_appimage:
+        py=_runtime_python(require_crypto=True)
+        result=subprocess.run([str(py), str(_runtime_script()), '--prepare-user-appimage'],
+                              cwd=str(_module_dir()), env=dict(os.environ),
+                              text=True, capture_output=True, timeout=150)
+        if result.returncode:
+            raise LauncherError('Unable to prepare direct AppImage launch:\n'+(result.stderr or result.stdout or '').strip())
+        try:
+            prepared=json.loads(result.stdout.strip())
+            base_cmd=[str(x) for x in prepared['cmd']]
+            launch_cwd=str(prepared['cwd'])
+            prepared_env={str(k):str(v) for k,v in prepared['env'].items()}
+        except (ValueError, KeyError, TypeError) as exc:
+            raise LauncherError('Invalid prepared AppImage launch data: '+str(exc)) from exc
+    else:
+        py=_runtime_python(require_crypto=True); arg='--launch-as-user'; launcher_script=_runtime_script(); base_cmd=[str(py),str(launcher_script),arg]
+        launch_cwd=str(launcher_script.parent)
+    log_path=_runtime_config_dir()/'external-theme-creator-runtime.log'; log_path.parent.mkdir(parents=True,exist_ok=True)
     if keep_current_session:
         log=open(log_path,'a',encoding='utf-8')
         kwargs={'cwd':launch_cwd,'stdin':subprocess.DEVNULL,'stdout':log,'stderr':subprocess.STDOUT}
         if os.name=='nt':kwargs['creationflags']=getattr(subprocess,'CREATE_NEW_PROCESS_GROUP',0)|getattr(subprocess,'DETACHED_PROCESS',0)
         else:kwargs['start_new_session']=True
+        if direct_appimage:
+            kwargs['env']=prepared_env
         subprocess.Popen(base_cmd,**kwargs);log.close();return True
     answer=QtWidgets.QMessageBox.question(parent or mw(),'Restart with theme','The current FreeCAD session will close and a new themed session will start. Continue?',QtWidgets.QMessageBox.Yes|QtWidgets.QMessageBox.No,QtWidgets.QMessageBox.No)
     if answer!=QtWidgets.QMessageBox.Yes:return False
     helper_dir=_runtime_config_dir()/'RestartHelper';helper_dir.mkdir(parents=True,exist_ok=True)
-    _spawn_prepared_launch(base_cmd,dict(os.environ),helper_dir,wait_pid=os.getpid(),log_path=log_path)
+    child_env=prepared_env if direct_appimage else dict(os.environ)
+    _spawn_prepared_launch(base_cmd,child_env,helper_dir,wait_pid=os.getpid(),log_path=log_path)
     try:
         if parent is not None and isinstance(parent,QtWidgets.QDialog):parent.accept()
         QtWidgets.QApplication.processEvents()
@@ -1585,6 +1749,10 @@ def _create_shortcut(mode,source,parent):
     if dlg.exec()!=QtWidgets.QDialog.Accepted:return
     py=_runtime_python(require_crypto=(mode=='user'));arg='--create-shortcut-user' if mode=='user' else '--create-shortcut-creator';flags=getattr(subprocess,'CREATE_NO_WINDOW',0) if os.name=='nt' else 0
     runtime_args=[str(py),str(_runtime_script()),arg,name.text().strip() or 'FreeCAD',location.text().strip()]
+    # Both Apply Theme and Develop Theme must pass the selection explicitly.
+    # In particular, a macOS .app shortcut must not rely on an unrelated or
+    # stale Theme Folder preference when it starts in a fresh process.
+    runtime_args.append(str(Path(source).expanduser().resolve()))
     r=subprocess.run(runtime_args,cwd=str(_module_dir()),text=True,capture_output=True,creationflags=flags)
     if r.returncode!=0:raise LauncherError((r.stderr or r.stdout or 'Shortcut creation failed.').strip())
     info('Shortcut created successfully:\n'+(r.stdout.strip() or location.text().strip()))
@@ -1641,17 +1809,19 @@ class AdvancedDialog(QtWidgets.QDialog):
             fb=QtWidgets.QPushButton('Browse');fb.clicked.connect(self.browse_theme_folder);form.addWidget(fb,row,3);row+=1
             form.addWidget(QtWidgets.QLabel('.cfg filename'),row,0)
             default_cfg=str(data.get('creator_cfg_filename','') or params().GetString(CFG_FILENAME_KEY,'')).strip()
-            if not default_cfg:
-                try:
-                    f=Path(self.folder.text().strip()).expanduser()
-                    cfgs=_top_level_files(f,'.cfg') if f.is_dir() else []
-                    if len(cfgs)==1: default_cfg=cfgs[0].name
-                    elif (f/CONFIG_NAME).is_file():
-                        tc=json.loads((f/CONFIG_NAME).read_text(encoding='utf-8')); default_cfg=str((tc.get('output') or {}).get('filename') or '').strip()
-                except Exception:pass
+            try:
+                f=Path(self.folder.text().strip()).expanduser()
+                cfgs=_top_level_files(f,'.cfg') if f.is_dir() else []
+                if len(cfgs)==1:
+                    default_cfg=cfgs[0].name
+                elif not cfgs and (f/CONFIG_NAME).is_file():
+                    tc=json.loads((f/CONFIG_NAME).read_text(encoding='utf-8'))
+                    candidate=str((tc.get('output') or {}).get('filename') or '').strip()
+                    if _valid_cfg_filename(candidate):default_cfg=candidate
+            except Exception:pass
             if not default_cfg:default_cfg='FreeCAD Theme.cfg'
             self.cfgname=QtWidgets.QLineEdit(default_cfg)
-            self.cfgname.setToolTip('Filename only, ending in .cfg. Used when external configuration is enabled.')
+            self.cfgname.setToolTip('Filename only, ending in .cfg. An existing single top-level Theme Folder .cfg is the persistent development profile; JSON output.filename is used when creating the profile.')
             form.addWidget(self.cfgname,row,1,1,3);row+=1
         form.addWidget(QtWidgets.QLabel('FreeCAD executable'),row,0)
         self.exe=QtWidgets.QLineEdit(str(data.get('freecad_executable','') or ''))
@@ -1665,7 +1835,7 @@ class AdvancedDialog(QtWidgets.QDialog):
             form.addWidget(QtWidgets.QLabel('Theme runtime location'),row,0)
             runtime_default=str(data.get('theme_runtime_location','') or _default_packaged_theme_runtime_location())
             self.theme_runtime_location=QtWidgets.QLineEdit(runtime_default)
-            self.theme_runtime_location.setToolTip('Base folder used for the temporary runtime created when FreeCAD starts from a .fctheme package.')
+            self.theme_runtime_location.setToolTip('Apply theme only: temporary .fctheme extraction folder. Contents are removed after the themed session exits. Develop theme uses the Theme Folder/.ExternalThemeCreator_runtime directory.')
             form.addWidget(self.theme_runtime_location,row,1,1,2)
             rb=QtWidgets.QPushButton('Browse');rb.clicked.connect(self.browse_theme_runtime_location);form.addWidget(rb,row,3);row+=1
 
@@ -1681,7 +1851,7 @@ class AdvancedDialog(QtWidgets.QDialog):
             form.addWidget(self.external_qss,row,0,1,4);row+=1
             self.external_cfg=QtWidgets.QCheckBox('Use external configuration (.cfg)')
             self.external_cfg.setChecked(bool(data.get('use_external_configuration',True)))
-            self.external_cfg.setToolTip('When enabled, use/generate the configured Theme Folder .cfg. When disabled, ignore Theme Folder .cfg files and use the normal system-user configuration.')
+            self.external_cfg.setToolTip('Apply theme-configuration.json instructions and dock layout when enabled. The separate persistent development .cfg remains in use even when disabled, so normal FreeCAD settings stay untouched.')
             form.addWidget(self.external_cfg,row,0,1,4);row+=1
             self.external_scripts=QtWidgets.QCheckBox('Use external UI scripts')
             self.external_scripts.setChecked(bool(data.get('use_external_ui_scripts',True)))
@@ -1733,6 +1903,18 @@ class AdvancedDialog(QtWidgets.QDialog):
             if not folder_text:raise LauncherError('Theme Folder cannot be empty.')
             folder=Path(folder_text).expanduser().resolve()
             cfgname=self.cfgname.text().strip() if self.cfgname is not None else ''
+            # A reused Theme Folder owns its existing persistent CFG; a freshly
+            # initialized folder follows its JSON output.filename. Prevent a
+            # stale setting from a previous Theme Folder from replacing either.
+            existing_cfgs=_top_level_files(folder,'.cfg')
+            if len(existing_cfgs)==1:
+                cfgname=existing_cfgs[0].name
+            elif not existing_cfgs and (folder/CONFIG_NAME).is_file():
+                try:
+                    tc=json.loads((folder/CONFIG_NAME).read_text(encoding='utf-8'))
+                    json_name=str((tc.get('output') or {}).get('filename') or '').strip()
+                    if _valid_cfg_filename(json_name):cfgname=json_name
+                except (OSError,ValueError,AttributeError):pass
             use_external_cfg=bool(self.external_cfg.isChecked())
             if use_external_cfg and not _valid_cfg_filename(cfgname):
                 try:
@@ -1951,6 +2133,7 @@ class ApplyDialog(QtWidgets.QDialog):
                 self.notice.setPlainText('License not accepted. Select License to review it again.')
         except Exception as exc:
             self.notice.setPlainText('Unable to read theme license:\n'+str(exc))
+            error('Unable to read theme license:\n'+str(exc))
 
     def show_license(self):
         try:
@@ -2359,18 +2542,18 @@ def _theme_folder_for_cfg_tools():
 def _configured_cfg_filename_for_instructions(folder=None, fallback=''):
     folder=Path(folder or _theme_folder_for_cfg_tools()).resolve()
     data=_load_runtime_settings()
-    name=str(data.get('creator_cfg_filename','') or params().GetString(CFG_FILENAME_KEY,'')).strip()
-    if _valid_cfg_filename(name): return name
+    cfgs=_top_level_files(folder,'.cfg')
+    if len(cfgs)==1:return cfgs[0].name
     tc=folder/CONFIG_NAME
     if tc.is_file():
         try:
             candidate=str(((json.loads(tc.read_text(encoding='utf-8')).get('output') or {}).get('filename') or '')).strip()
             if _valid_cfg_filename(candidate): return candidate
         except Exception: pass
+    name=str(data.get('creator_cfg_filename','') or params().GetString(CFG_FILENAME_KEY,'')).strip()
     fallback=str(fallback or '').strip()
-    if _valid_cfg_filename(fallback): return fallback
-    cfgs=_top_level_files(folder,'.cfg')
-    if len(cfgs)==1:return cfgs[0].name
+    if _valid_cfg_filename(name):return name
+    if _valid_cfg_filename(fallback):return fallback
     return 'FreeCAD Theme.cfg'
 
 def _set_configured_cfg_filename(name, folder=None, sync_json=True):

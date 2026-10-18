@@ -1,70 +1,60 @@
-
 # External Theme Creator
 
-<img src="docs/images/icons.png" alt="External Theme Creator toolbar icons" width="420">
+A FreeCAD workbench for developing, testing, inspecting, applying and distributing **external UI themes**. Themes can include QSS stylesheets and related assets, SVG icon overrides, FreeCAD configuration instructions, startup scripts, and splash artwork.
 
-**External Theme Creator (ETC)** is a FreeCAD workbench for creating, developing, applying, and distributing external UI themes.
+> **Version 0.9.86 — cross-platform update.** Source repository: [FreeCAD-Nut/ExternalThemeCreator](https://github.com/FreeCAD-Nut/ExternalThemeCreator). This workbench has not yet been submitted to the official FreeCAD Addon Index. Review artwork redistribution rights and the security notes before republishing a modified distribution.
 
-Unlike FreeCAD's built-in theming system, external themes use a separate loading mechanism, offering an alternative approach to FreeCAD UI customization.
+## Features
 
-External themes can be created and distributed outside and independently of the official FreeCAD project, without requiring adherence to its artwork guidelines, GitHub hosting, or project approval. Creators can develop themes featuring entirely original artwork, retaining control over its licensing and distribution.
+- **Develop theme** — work from a Theme Folder with independent switches for icons, QSS and its assets, configuration, and optional scripts.
+- **Apply theme** — select an exported `.fctheme` package, review its license, and run with that theme.
+- **Export theme** — package themes for distribution; optional author-key signing and encryption features may need additional Python packages.
+- **QSS reload / Icons reload** — iterate on development theme assets without a full restart where supported.
+- **CFG Instructions** — inspect/capture FreeCAD parameters and generate theme configuration instructions.
+- **UI Inspector** — inspect Qt widgets and identify candidate commands and icon files.
 
-External themes also offer customization capabilities beyond FreeCAD's built-in themes, supporting additional resources such as custom icons, splash screens, preference instructions and color palettes, application shortcut icons, and more.
+## Compatibility
 
-**ETC aims to encourage broader participation in FreeCAD theme development**, making the process more approachable to graphic UI designers with minimal programming experience and increasing the variety of themes available to users.
+Developed and tested with **FreeCAD on Windows 11**, a **Linux x86_64 FreeCAD AppImage**, and **macOS Intel**. The maintainer also completed a testing round on **Apple Silicon** before preparing this update; detailed FreeCAD/Python/Qt version combinations and a full release test matrix are not yet recorded. Compatibility with every stable/development FreeCAD release is not guaranteed.
 
-## Workbench Tools
-
-ETC provides seven tools for creating, managing, and distributing external themes.
-
-### Apply theme
-
-Load and apply an external `.fctheme` package to FreeCAD.
-
-<img src="docs/images/apply-theme.png" alt="Apply theme dialog" width="550">
-
-### Develop theme
-
-Develop and test an external theme directly from a folder containing the theme assets.
-
-<img src="docs/images/develop-theme.png" alt="Develop theme dialog" width="500">
-
-### Reload QSS
-
-Reload theme stylesheets without restarting FreeCAD.
-
-### Reload icons
-
-Reload modified SVG icons during theme development.
-
-### CFG instructions
-
-Create and manage FreeCAD preference instructions for external themes through differential comparison of `.cfg` files or real-time capture of FreeCAD configuration changes.
-
-<img src="docs/images/cfg-instructions.png" alt="CFG instructions dialog" width="750">
-
-### UI inspector
-
-Inspect FreeCAD interface elements and identify their associated properties and icons.
-
-<img src="docs/images/ui-inspector.png" alt="UI inspector dialog" width="750">
-
-### Export theme
-
-Package an external theme into a single, easy-to-distribute theme file.
-
-<img src="docs/images/export-theme.png" alt="Export theme dialog" width="750">
+ETC uses FreeCAD/PySide and the Python standard library for its core workbench functions. Optional signing/encryption functionality uses `cryptography` (which may require `cffi` and `pycparser` in some environments). The confirmation-based installer supports platform-dependent FreeCAD Python environments and separates macOS Intel/Apple Silicon binary dependencies. See [security and dependencies](docs/SECURITY_AND_DEPENDENCIES.md).
 
 ## Installation
 
-Download the latest release from the [Releases](https://github.com/FreeCAD-Nut/ExternalThemeCreator/releases) page.
+Until the Addon Index lists this workbench, install manually:
 
-Extract the installation archive into your FreeCAD user `Mod` directory and restart FreeCAD.
+1. Close FreeCAD.
+2. Copy the complete `ExternalThemeCreator/` directory into your user FreeCAD `Mod` directory. On Windows this is usually `%APPDATA%\FreeCAD\Mod\` (confirm with `App.getUserAppDataDir()` in the FreeCAD Python console).
+3. Restart FreeCAD and choose **External Theme Creator** in the workbench selector.
 
-## Licensing
+**Important upgrade:** if your system has the old `Mod/ThemeCreator/` version installed, back it up and remove the old workbench folder before installing `ExternalThemeCreator/`. Keep your separate external Theme Folder and existing FreeCAD preferences.
 
-External Theme Creator source code is licensed under **LGPL-2.1-or-later**.
+The GitHub repository stores the contents of `ExternalThemeCreator/` at its top level. The downloadable manual-install ZIP wraps those files in `ExternalThemeCreator/`.
 
-Original ETC icon artwork © 2026 Vincenzo Lazzi, licensed under **CC BY 4.0**.
+## Basic workflow
 
-External themes created using ETC are independent works and may be distributed under licensing terms chosen by their creators, subject to the rights and licenses of any included third-party content.
+1. Prepare a separate Theme Folder. Keep user themes and their `scripts/` directory outside the addon installation folder.
+2. Use **Develop theme** to point ETC to the folder and choose which assets to enable.
+3. Restart into development mode to test the isolated theme, use QSS/Icons reload during iteration, and inspect the resulting UI.
+4. Use **Export theme** to create a distributable theme; recipients should review the theme's license and scripts before applying it.
+
+## Safety and privacy
+
+ETC can launch FreeCAD subprocesses, write launch profiles/configuration, install user desktop shortcuts, execute **user-provided theme scripts**, and optionally retrieve dependencies or perform opt-in Inspector network searches. These actions are inherent to the selected feature; simply loading the workbench must not download dependencies or execute an unrelated theme. **Only apply themes from trusted sources.** See [security notes](docs/SECURITY_AND_DEPENDENCIES.md).
+
+## Documentation
+
+- [Release history](CHANGELOG.md)
+- [Artwork credits and permissions](ARTWORK_NOTICES.md)
+- [Historical development notes](docs/DEVELOPMENT_HISTORY.md)
+- [Security, side effects, and optional dependencies](docs/SECURITY_AND_DEPENDENCIES.md)
+- [Release and Addon Index checklist](docs/RELEASE_CHECKLIST.md)
+- [Testing instructions](docs/TEST_PLAN.md)
+
+## License
+
+The workbench source declares **LGPL-2.1-or-later**; see [LICENSE](LICENSE). Bundled Creative Commons license reference texts in `CC_Licenses/` are provided for theme-export licensing workflows; their presence does **not** license ETC's code or icon assets under those CC licenses. The seven ETC command SVGs, including the workbench icon `ETC_export.svg`, bear the notice **© 2026 Vincenzo Lazzi. All rights reserved.** This notice is separate from the workbench source-code LGPL license. Public redistribution permissions for these icons must be confirmed before publication.
+
+## Issues and feedback
+
+Report problems via [GitHub Issues](https://github.com/FreeCAD-Nut/ExternalThemeCreator/issues). Please include the FreeCAD version, operating system, theme launch method (Apply/Develop, Restart/shortcut), and reproduction steps.

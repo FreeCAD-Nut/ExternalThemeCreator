@@ -6,6 +6,8 @@ an incompatible Python ssl.py/_ssl.pyd pair. No changes to FreeCAD's files.
 import hashlib
 import importlib
 import json
+import platform
+import shutil
 import os
 from pathlib import Path
 import subprocess
@@ -24,11 +26,20 @@ DIAGNOSTIC = ('from cryptography.fernet import Fernet; '
 def _root():
     if os.name == 'nt':
         return Path(os.environ.get('APPDATA') or (Path.home()/'AppData'/'Roaming'))/'ExternalThemeCreator'/'python-deps'
-    return Path.home()/'.local'/'share'/'ExternalThemeCreator'/'python-deps'
+    if sys.platform == 'darwin':
+        return Path.home()/'Library'/'Application Support'/'ExternalThemeCreator'/'python-deps'
+    return Path(os.environ.get('XDG_DATA_HOME') or (Path.home()/'.local'/'share'))/'ExternalThemeCreator'/'python-deps'
 
 
-def _folder(version):
-    return _root()/('py%d%d' % (version[0],version[1]))
+def _folder(version, architecture=None):
+    name = 'py%d%d' % (version[0],version[1])
+    if sys.platform == 'darwin':
+        # Prevent Intel, Apple Silicon and Rosetta from sharing binary wheels.
+        arch = (architecture or platform.machine()).strip().lower()
+        if arch not in ('arm64', 'x86_64'):
+            raise RuntimeError('Unsupported macOS Python architecture: ' + arch)
+        name += '-darwin-' + arch
+    return _root()/name
 
 
 def activate(version=None):
@@ -46,7 +57,7 @@ def _confirm(parent):
         from PySide6 import QtWidgets
     msg = ('Signed theme export and Author Keys require cryptography.\n\n'
            'External Theme Creator can automatically download verified binary packages '
-           'from PyPI using Windows HTTPS, install them into your user profile, '
+           'from PyPI over HTTPS, install them into your user profile, '
            'and test signing and encryption. FreeCAD files will not be modified.\n\n'
            'Continue?')
     return QtWidgets.QMessageBox.question(parent,'External Theme Creator dependency',msg,
@@ -112,7 +123,7 @@ def _select_wheel(meta, tags):
                   if (t:=p+'-'+a+'-'+plat) in ranks),default=None)
         if rank is not None:eligible.append((rank,entry))
     if not eligible:
-        raise RuntimeError('No matching precompiled Windows wheel on PyPI for '+
+        raise RuntimeError('No matching precompiled wheel on PyPI for '+
                            str(meta.get('info',{}).get('name','package')))
     return min(eligible,key=lambda x:x[0])[1]
 
@@ -134,8 +145,65 @@ def _fetch_wheels(exe, wheel_dir):
     return wheel_dir
 
 
-def _diagnose(exe,version):
-    target=_folder(version)
+def _fetch_wheels_portable(exe, wheel_dir):
+    """Resolve binary-only dependency wheels with the target Python interpreter.
+
+    pip performs TLS certificate verification and resolves transitive dependencies.
+    Compare each wheel to its published PyPI SHA-256 digest before installing.
+    """
+    _run([exe, '-m', 'pip', 'download', '--disable-pip-version-check',
+          '--only-binary=:all:', '--dest', wheel_dir, 'cryptography'], timeout=240)
+    wheels = sorted(wheel_dir.glob('*.whl'))
+    if not wheels:
+        raise RuntimeError('pip download produced no dependency wheels.')
+    verify = r"""import hashlib, json, sys, urllib.request
+from pathlib import Path
+for file in Path(sys.argv[1]).glob('*.whl'):
+    # The PyPI JSON distribution endpoint exposes hashes for the full release.
+    stem = file.name[:-4].rsplit('-', 3)[0]
+    package, version = stem.rsplit('-', 1)
+    url = 'https://pypi.org/pypi/{}/{}/json'.format(package.replace('_', '-'), version)
+    with urllib.request.urlopen(url, timeout=30) as response:
+        metadata = json.load(response)
+    matching = [x for x in metadata.get('urls', []) if x.get('filename') == file.name]
+    if len(matching) != 1:
+        raise RuntimeError('Cannot confirm wheel on PyPI: ' + file.name)
+    expected = matching[0].get('digests', {}).get('sha256', '')
+    actual = hashlib.sha256(file.read_bytes()).hexdigest()
+    if not expected or actual.lower() != expected.lower():
+        raise RuntimeError('SHA-256 verification failed for ' + file.name)
+print('All binary wheel hashes verified')"""
+    _run([exe, '-c', verify, wheel_dir], timeout=180)
+    return wheel_dir
+
+
+def _bundled_python():
+    """Locate Python belonging to the running FreeCAD bundle, not system Python."""
+    exe = Path(sys.executable)
+    if 'python' in exe.name.casefold() and exe.is_file():
+        return exe
+    directory = exe.parent
+    if os.name == 'nt':
+        names = ('python.exe', 'pythonw.exe')
+    else:
+        names = ('python', 'python3', 'python%d.%d' % sys.version_info[:2])
+    roots = (directory, directory.parent / 'bin', directory.parent / 'Resources' / 'bin',
+             directory.parent.parent / 'bin')
+    for root in roots:
+        for name in names:
+            candidate = root / name
+            if candidate.is_file():
+                try:
+                    if _interpreter_version(candidate) == sys.version_info[:2]:
+                        return candidate
+                except Exception:
+                    pass
+    raise RuntimeError('Cannot locate the Python interpreter bundled with this FreeCAD installation. '
+                       'Expected Python %d.%d beside the FreeCAD executable.' % sys.version_info[:2])
+
+
+def _diagnose(exe,version,architecture=None):
+    target=_folder(version,architecture)
     env=os.environ.copy()
     env['PYTHONPATH']=str(target)+os.pathsep+env.get('PYTHONPATH','')
     try:
@@ -144,14 +212,14 @@ def _diagnose(exe,version):
         raise RuntimeError('Dependency diagnostic failed (import, Ed25519 or Fernet): '+str(exc)) from exc
 
 
-def _install(exe,version):
-    target=_folder(version)
+def _install(exe,version,architecture=None):
+    target=_folder(version,architecture)
     target.mkdir(parents=True,exist_ok=True)
     try:
         with tempfile.TemporaryDirectory(prefix='tc_wheels_') as temp:
             directory=Path(temp)
             try:
-                _fetch_wheels(exe,directory)
+                (_fetch_wheels if os.name == 'nt' else _fetch_wheels_portable)(exe,directory)
             except Exception as exc:
                 raise RuntimeError('Download or wheel verification failed: '+str(exc)) from exc
             try:
@@ -160,11 +228,12 @@ def _install(exe,version):
                       '--upgrade','--target',target,'cryptography'],timeout=180)
             except Exception as exc:
                 raise RuntimeError('Local wheel installation failed: '+str(exc)) from exc
-        _diagnose(exe,version)
+        _diagnose(exe,version,architecture)
     except Exception as exc:
         raise RuntimeError('cryptography setup failed.\n\n'+str(exc)) from exc
     importlib.invalidate_caches()
-    activate(version)
+    if version == sys.version_info[:2] and (architecture is None or architecture == platform.machine().lower()):
+        activate(version)
     return True
 
 
@@ -175,12 +244,17 @@ def _interpreter_version(exe):
 
 def _ensure(exe,parent=None):
     version=_interpreter_version(exe)
+    architecture=None
+    if sys.platform == 'darwin':
+        # Select binary wheels for the target process, not necessarily FreeCAD's
+        # architecture (e.g. Intel Python run under Rosetta on Apple Silicon).
+        architecture=_run([exe,'-c','import platform;print(platform.machine())'],timeout=15).strip().splitlines()[-1].lower()
     try:
-        _diagnose(exe,version)
+        _diagnose(exe,version,architecture)
     except Exception:
         if not _confirm(parent):return None
-        _install(exe,version)
-    return str(_folder(version))
+        _install(exe,version,architecture)
+    return str(_folder(version,architecture))
 
 
 def ensure_current(parent=None):
@@ -190,8 +264,7 @@ def ensure_current(parent=None):
         return True
     except (ImportError,OSError,AssertionError):
         pass
-    exe=Path(sys.executable)
-    if 'freecad' in exe.name.lower():exe=exe.parent/'python.exe'
+    exe=_bundled_python()
     if not exe.is_file():
         raise RuntimeError('FreeCAD Python interpreter not found: '+str(exe))
     if _ensure(exe,parent) is None:return False
