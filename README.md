@@ -1,6 +1,8 @@
 
 # External Theme Creator
 
+<img src="docs/images/icons.png" alt="External Theme Creator toolbar icons" width="420">
+
 **External Theme Creator (ETC)** is a FreeCAD workbench for creating, developing, applying, and distributing external UI themes.
 
 Unlike FreeCAD's built-in theming system, external themes use a separate loading mechanism, offering an alternative approach to FreeCAD UI customization.
@@ -15,47 +17,43 @@ External themes also offer customization capabilities beyond FreeCAD's built-in 
 
 ETC provides seven tools for creating, managing, and distributing external themes.
 
-### Apply Theme
+### Apply theme
 
 Load and apply an external `.fctheme` package to FreeCAD.
 
-*Screenshot coming soon.*
+<img src="docs/images/apply-theme.png" alt="Apply theme dialog" width="550">
 
-### Develop Theme
+### Develop theme
 
 Develop and test an external theme directly from a folder containing the theme assets.
 
-*Screenshot coming soon.*
+<img src="docs/images/develop-theme.png" alt="Develop theme dialog" width="500">
 
 ### Reload QSS
 
 Reload theme stylesheets without restarting FreeCAD.
 
-*Screenshot coming soon.*
-
-### Reload Icons
+### Reload icons
 
 Reload modified SVG icons during theme development.
 
-*Screenshot coming soon.*
-
-### Theme Configuration
+### CFG instructions
 
 Create and manage FreeCAD preference instructions for external themes through differential comparison of `.cfg` files or real-time capture of FreeCAD configuration changes.
 
-*Screenshot coming soon.*
+<img src="docs/images/cfg-instructions.png" alt="CFG instructions dialog" width="750">
 
-### UI Inspector
+### UI inspector
 
 Inspect FreeCAD interface elements and identify their associated properties and icons.
 
-*Screenshot coming soon.*
+<img src="docs/images/ui-inspector.png" alt="UI inspector dialog" width="750">
 
-### Export Theme
+### Export theme
 
 Package an external theme into a single, easy-to-distribute theme file.
 
-*Screenshot coming soon.*
+<img src="docs/images/export-theme.png" alt="Export theme dialog" width="750">
 
 ## Installation
 
