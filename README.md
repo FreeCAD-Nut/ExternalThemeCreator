@@ -2,7 +2,7 @@
 
 A FreeCAD workbench for developing, testing, inspecting, applying and distributing **external UI themes**. Themes can include QSS stylesheets and related assets, SVG icon overrides, FreeCAD configuration instructions, startup scripts, and splash artwork.
 
-> **Version 0.9.86 — cross-platform update.** Source repository: [FreeCAD-Nut/ExternalThemeCreator](https://github.com/FreeCAD-Nut/ExternalThemeCreator). This workbench has not yet been submitted to the official FreeCAD Addon Index. Review artwork redistribution rights and the security notes before republishing a modified distribution.
+> **Version 0.9.86 — cross-platform update.** Source repository: [FreeCAD-Nut/ExternalThemeCreator](https://github.com/FreeCAD-Nut/ExternalThemeCreator). This workbench has not yet been submitted to the official FreeCAD Addon Index. See the artwork notices and security notes before redistributing a modified package.
 
 ## Features
 
@@ -53,7 +53,7 @@ ETC can launch FreeCAD subprocesses, write launch profiles/configuration, instal
 
 ## License
 
-The workbench source declares **LGPL-2.1-or-later**; see [LICENSE](LICENSE). Bundled Creative Commons license reference texts in `CC_Licenses/` are provided for theme-export licensing workflows; their presence does **not** license ETC's code or icon assets under those CC licenses. The seven ETC command SVGs, including the workbench icon `ETC_export.svg`, bear the notice **© 2026 Vincenzo Lazzi. All rights reserved.** This notice is separate from the workbench source-code LGPL license. Public redistribution permissions for these icons must be confirmed before publication.
+The workbench source code is licensed under **LGPL-2.1-or-later**; see [LICENSE](LICENSE). The seven original ETC command and workbench SVG icons in `Resources/icons/` are **© 2026 Vincenzo Lazzi**, licensed separately under **Creative Commons Attribution 4.0 International (CC BY 4.0)**. See [ARTWORK_NOTICES.md](ARTWORK_NOTICES.md) for the complete attribution and terms. Other graphical resources, including bundled default shortcut icons and third-party assets, have separate origins and may be subject to different copyrights and licenses. The Creative Commons license reference files in `CC_Licenses/` support theme-export licensing workflows and do not themselves license unrelated bundled assets.
 
 ## Issues and feedback
 
