@@ -10,7 +10,8 @@
 
 ## Release follow-up and Addon Index preparation
 
-- [ ] Confirm redistribution permission for artwork labeled `© 2026 Vincenzo Lazzi. All rights reserved.` and bundled shortcut assets. Verify code author attribution.
+- [x] Document the seven original ETC SVG icons as © 2026 Vincenzo Lazzi, licensed under CC BY 4.0; see `ARTWORK_NOTICES.md`.
+- [ ] Document the source and applicable upstream terms of FreeCAD-created assets in `Default_Shortcut_Icons/`; verify code author attribution.
 - [x] Create public repository and populate the real repository URL in package.xml and README.
 - [ ] Confirm maintainer contact information (email optional if maintainer chooses not to expose it publicly).
 - [x] Use `ETC_export.svg` for both the workbench selector and Addon Manager icon.
